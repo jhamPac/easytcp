@@ -5,10 +5,11 @@ import (
 	"log"
 	"net"
 	"strings"
+	"time"
 )
 
 func main() {
-	s := Server{"localhost:9000"}
+	s := Server{"localhost:9000", time.Duration(3 * time.Second)}
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal("oops")
 	}
@@ -16,7 +17,29 @@ func main() {
 
 // Server represents Server type
 type Server struct {
-	Addr string
+	Addr        string
+	IdleTimeout time.Duration
+}
+
+// ConnWrapper wraps around the net.Conn returned from net.Listen
+type ConnWrapper struct {
+	net.Conn
+	IdleTimeout time.Duration
+}
+
+func (c *ConnWrapper) Write(p []byte) (int, error) {
+	c.updateDeadLine()
+	return c.Conn.Write(p)
+}
+
+func (c *ConnWrapper) Read(b []byte) (int, error) {
+	c.updateDeadLine()
+	return c.Conn.Read(b)
+}
+
+func (c *ConnWrapper) updateDeadLine() {
+	iTime := time.Now().Add(c.IdleTimeout)
+	c.Conn.SetDeadline(iTime)
 }
 
 // ListenAndServe executes the server
@@ -32,13 +55,19 @@ func (srv Server) ListenAndServe() error {
 	}
 	defer listener.Close()
 	for {
-		conn, err := listener.Accept()
+		c, err := listener.Accept()
+		conn := &ConnWrapper{
+			Conn:        c,
+			IdleTimeout: srv.IdleTimeout,
+		}
+
 		if err != nil {
 			log.Printf("error accepting connection %v", err)
 			continue
 		}
 		log.Printf("accepted connection from %v", conn.RemoteAddr())
-		handle(conn)
+		conn.SetDeadline(time.Now().Add(conn.IdleTimeout))
+		go handle(conn)
 	}
 }
 
