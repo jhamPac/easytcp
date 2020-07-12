@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -9,7 +10,7 @@ import (
 )
 
 func main() {
-	s := Server{"localhost:9000", time.Duration(3 * time.Second)}
+	s := Server{"localhost:9000", time.Duration(10 * time.Second)}
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal("oops")
 	}
@@ -34,7 +35,8 @@ func (c *ConnWrapper) Write(p []byte) (int, error) {
 
 func (c *ConnWrapper) Read(b []byte) (int, error) {
 	c.updateDeadLine()
-	return c.Conn.Read(b)
+	r := io.LimitReader(c.Conn, 1<<(10*3))
+	return r.Read(b)
 }
 
 func (c *ConnWrapper) updateDeadLine() {
