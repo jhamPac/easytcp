@@ -7,6 +7,13 @@ import (
 	"strings"
 )
 
+func main() {
+	s := Server{"localhost:9000"}
+	if err := s.ListenAndServe(); err != nil {
+		log.Fatal("oops")
+	}
+}
+
 // Server represents Server type
 type Server struct {
 	Addr string
