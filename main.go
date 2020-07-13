@@ -2,19 +2,36 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
 )
 
 func main() {
-	s := Server{}
-	s.Addr = "localhost:9000"
-	s.IdleTimeout = time.Duration(10 * time.Second)
-	s.MaxReadbytes = 1 << (10 * 3)
+	s := Server{
+		Addr:         "localhost:9000",
+		IdleTimeout:  10 * time.Second,
+		MaxReadbytes: 1 << (10 * 2),
+	}
+
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt)
+
+	// handle ^C interrupt signals gracefully
+	go func() {
+		select {
+		case sig := <-c:
+			fmt.Println("An interrupt signal was detected:", sig)
+			os.Exit(1)
+		}
+	}()
+
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal("oops")
 	}
@@ -63,7 +80,7 @@ func (c *ConnWrapper) updateDeadLine() {
 }
 
 // ListenAndServe executes the server
-func (srv Server) ListenAndServe() error {
+func (srv *Server) ListenAndServe() error {
 	addr := srv.Addr
 	if addr == "" {
 		addr = ":9000"
@@ -92,29 +109,77 @@ func (srv Server) ListenAndServe() error {
 		}
 
 		log.Printf("accepted connection from %v", conn.RemoteAddr())
+		srv.trackConn(conn)
 		conn.SetDeadline(time.Now().Add(conn.IdleTimeout))
-		go handle(conn)
+		go srv.handle(conn)
 	}
+	return nil
 }
 
-func handle(conn net.Conn) error {
+func (srv *Server) trackConn(c *ConnWrapper) {
+	defer srv.mu.Unlock()
+	srv.mu.Lock()
+	if srv.conns == nil {
+		srv.conns = make(map[*ConnWrapper]struct{})
+	}
+	srv.conns[c] = struct{}{}
+}
+
+func (srv *Server) handle(conn *ConnWrapper) error {
 	defer func() {
 		log.Printf("closing connection from %v", conn.RemoteAddr())
+		conn.Close()
+		srv.deleteConn(conn)
 	}()
 	r := bufio.NewReader(conn)
 	w := bufio.NewWriter(conn)
 	scanner := bufio.NewScanner(r)
+
+	sc := make(chan bool)
+	deadline := time.After(conn.IdleTimeout)
 	for {
-		scanned := scanner.Scan()
-		if !scanned {
-			if err := scanner.Err(); err != nil {
-				log.Printf("%v(%v)", err, conn.RemoteAddr())
-				return err
+		go func(s chan bool) {
+			s <- scanner.Scan()
+		}(sc)
+
+		select {
+		case <-deadline:
+			return nil
+		case scanned := <-sc:
+			if !scanned {
+				if err := scanner.Err(); err != nil {
+					log.Printf("%v(%v)", err, conn.RemoteAddr())
+					return err
+				}
+				break
 			}
-			break
+			w.WriteString(strings.ToUpper(scanner.Text()) + "\n")
+			w.Flush()
 		}
-		w.WriteString(strings.ToUpper(scanner.Text()) + "\n")
-		w.Flush()
 	}
 	return nil
+}
+
+func (srv *Server) deleteConn(conn *ConnWrapper) {
+	defer srv.mu.Unlock()
+	srv.mu.Lock()
+	delete(srv.conns, conn)
+}
+
+// Shutdown initiates the shutdown process
+func (srv *Server) Shutdown() {
+	srv.inShutDown = true
+	log.Println("shutting down...")
+	srv.listener.Close()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("waiting on %v connections", len(srv.conns))
+		}
+		if len(srv.conns) == 0 {
+			return
+		}
+	}
 }
