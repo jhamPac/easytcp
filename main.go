@@ -6,11 +6,15 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"time"
 )
 
 func main() {
-	s := Server{"localhost:9000", time.Duration(10 * time.Second)}
+	s := Server{}
+	s.Addr = "localhost:9000"
+	s.IdleTimeout = time.Duration(10 * time.Second)
+	s.MaxReadbytes = 1 << (10 * 3)
 	if err := s.ListenAndServe(); err != nil {
 		log.Fatal("oops")
 	}
@@ -18,14 +22,22 @@ func main() {
 
 // Server represents Server type
 type Server struct {
-	Addr        string
-	IdleTimeout time.Duration
+	Addr         string
+	IdleTimeout  time.Duration
+	MaxReadbytes int64
+
+	listener   net.Listener
+	conns      map[*ConnWrapper]struct{}
+	mu         sync.Mutex
+	inShutDown bool
 }
 
 // ConnWrapper wraps around the net.Conn returned from net.Listen
 type ConnWrapper struct {
 	net.Conn
-	IdleTimeout time.Duration
+
+	IdleTimeout   time.Duration
+	MaxReadBuffer int64
 }
 
 func (c *ConnWrapper) Write(p []byte) (int, error) {
@@ -35,8 +47,14 @@ func (c *ConnWrapper) Write(p []byte) (int, error) {
 
 func (c *ConnWrapper) Read(b []byte) (int, error) {
 	c.updateDeadLine()
-	r := io.LimitReader(c.Conn, 1<<(10*3))
+	r := io.LimitReader(c.Conn, c.MaxReadBuffer)
 	return r.Read(b)
+}
+
+// Close closes the connection
+func (c *ConnWrapper) Close() (err error) {
+	err = c.Conn.Close()
+	return err
 }
 
 func (c *ConnWrapper) updateDeadLine() {
@@ -56,17 +74,23 @@ func (srv Server) ListenAndServe() error {
 		return err
 	}
 	defer listener.Close()
+	srv.listener = listener
 	for {
-		c, err := listener.Accept()
-		conn := &ConnWrapper{
-			Conn:        c,
-			IdleTimeout: srv.IdleTimeout,
+		if srv.inShutDown {
+			break
 		}
-
+		c, err := listener.Accept()
 		if err != nil {
 			log.Printf("error accepting connection %v", err)
 			continue
 		}
+
+		conn := &ConnWrapper{
+			Conn:          c,
+			IdleTimeout:   srv.IdleTimeout,
+			MaxReadBuffer: srv.MaxReadbytes,
+		}
+
 		log.Printf("accepted connection from %v", conn.RemoteAddr())
 		conn.SetDeadline(time.Now().Add(conn.IdleTimeout))
 		go handle(conn)
