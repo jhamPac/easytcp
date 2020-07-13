@@ -28,7 +28,7 @@ func main() {
 		select {
 		case sig := <-c:
 			fmt.Println("An interrupt signal was detected:", sig)
-			os.Exit(1)
+			s.Shutdown()
 		}
 	}()
 
@@ -157,7 +157,6 @@ func (srv *Server) handle(conn *ConnWrapper) error {
 			w.Flush()
 		}
 	}
-	return nil
 }
 
 func (srv *Server) deleteConn(conn *ConnWrapper) {
